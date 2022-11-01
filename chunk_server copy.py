@@ -1,3 +1,4 @@
+import threading
 import rpyc
 import uuid
 import os
@@ -17,6 +18,9 @@ class ChunkServerService(rpyc.Service):
       if len(chunk_servers)>0:
         self.forward(block_uuid,data,chunk_servers)
 
+    def exposed_write(self,block_uuid,data):
+      with open(DATA_DIR+str(block_uuid),'w') as f:
+        f.write(data)
 
     def exposed_get(self,block_uuid):
       block_addr=DATA_DIR+str(block_uuid)
@@ -52,7 +56,12 @@ if __name__ == "__main__":
   if not os.path.isdir(DATA_DIR): 
     os.mkdir(DATA_DIR)
     print(DATA_DIR)
-  
+
   port_no = int(sys.argv[1])
+  con=rpyc.connect("localhost",port=2131)
+  master=con.root.Master()
+  master.heartbeat("localhost",port_no)
+  threading.Timer(10, master.heartbeat, ["localhost", port_no]).start()
+
   t = ThreadedServer(ChunkServerService, port = port_no)
   t.start()
