@@ -26,24 +26,33 @@ class MasterService(rpyc.Service):
 
     block_size = 0
     replication_factor = 0
-
-    def __init__(self, backup_interval = 60.0, threshold_seconds = 30) -> None:
+    
+    class RepeatingTimer(threading.Timer):
+      def run(self):
+        while not self.finished.is_set():
+          self.function(*self.args, **self.kwargs)
+          self.finished.wait(self.interval)
+    
+    def __init__(self, backup_interval = 60.0, threshold_seconds = 15) -> None:
       super().__init__()
       self.threshold_seconds = threshold_seconds
-      threading.Timer(backup_interval, self.persistent_state).start()
+      self.RepeatingTimer(backup_interval, self.persistent_state).start()
 
-      for val in self.chunk_servers.values():
-        self.chunkserver2heartbeat_time[val[0]+":"+val[1]] = datetime.datetime.now()
-      threading.Timer(threshold_seconds, self.check_fail_over).start()
+      # for val in self.chunk_servers.values():
+      #   port = str(val[1])
+      #   self.chunkserver2heartbeat_time[val[0]+":"+port] = datetime.datetime.now()
+      self.RepeatingTimer(threshold_seconds, self.handle_fail_over).start()
 
 
     def persistent_state(self):
+      LOG.info("Persistent State is backedup")
       pickle.dump((MasterService.exposed_Master.file2blocks,MasterService.exposed_Master.block2chunkservers), open('fs.img','wb'))
 
     def exposed_heartbeat(self, host, port):
-      self.chunkserver2heartbeat_time[host+":"+port] = datetime.datetime.now()
+      # LOG.info(f"Heartbeat received from {port}")
+      self.chunkserver2heartbeat_time[host+":"+str(port)] = datetime.datetime.now()
 
-    def write_to_chunkserver(block_uuid,data,chunkserver):
+    def write_to_chunkserver(self, block_uuid,data,chunkserver):
       LOG.info("sending: " + str(block_uuid) + str(chunkserver))
       host,port = chunkserver
 
@@ -62,19 +71,17 @@ class MasterService(rpyc.Service):
           data = self.read_from_chunkserver(block[0],m)
           if data:
             return data
-        else:
-            LOG.info("No blocks found. Possibly a corrupt file")
     
-    def check_fail_over(self):
+    def handle_fail_over(self):
       current_time = datetime.datetime.now()
-      for chunkserver,heartbeat_time in self.chunkserver2heartbeat_time.items():
+      for chunkserver, heartbeat_time in self.chunkserver2heartbeat_time.items():
         if (current_time - heartbeat_time).total_seconds() > self.threshold_seconds:
-          print(f"{chunkserver} has failed")
+          LOG.info(f"{chunkserver} has failed")
           # ------ Handling Failover-------
           del self.chunk_servers[self.host2id[chunkserver]]
           # Find the blocks that were contained in failed server and rewrite it
           chunkserver_id = self.host2id[chunkserver]
-          for block,chunkservers in self.block2chunkservers:
+          for block,chunkservers in self.block2chunkservers.items():
             if chunkserver_id in chunkservers:
                 # Allocate block
                 block_uuid = uuid.uuid1()
@@ -94,11 +101,11 @@ class MasterService(rpyc.Service):
                 self.write_to_chunkserver(block_uuid, data, chunkserver.split(":"))
 
 
-    def read(self,fname):
+    def exposed_read(self,fname):
       mapping = self.file2blocks[fname]
       return mapping
 
-    def write(self,dest,size):
+    def exposed_write(self,dest,size):
       if self.exists(dest):
         pass
 
@@ -120,10 +127,10 @@ class MasterService(rpyc.Service):
       else:
         return None
 
-    def get_block_size(self):
+    def exposed_get_block_size(self):
       return self.block_size
 
-    def get_chunkservers(self):
+    def exposed_get_chunkservers(self):
       return self.chunk_servers
 
     def calc_num_blocks(self,size):
@@ -152,25 +159,26 @@ def signal_handler(signal, frame):
 
 def set_conf():
   conf = configparser.ConfigParser()
-  conf.readfp(open('dfs.conf'))
+  conf.read_file(open('dfs copy.conf'))
   MasterService.exposed_Master.block_size = int(conf.get('master','block_size'))
   MasterService.exposed_Master.replication_factor = int(conf.get('master','replication_factor'))
   chunk_servers = conf.get('master','chunk_servers').split(',')
   for m in chunk_servers:
-    id,host,port=m.split(":")
-    MasterService.exposed_Master.chunk_servers[id] = (host,port)
-    MasterService.exposed_Master.host2id[host+":"+port] = id
+    id, host, port = m.split(":")
+    MasterService.exposed_Master.chunk_servers[id] = (host, port)
+    MasterService.exposed_Master.host2id[host + ":" + str(port)] = id
 
   if os.path.isfile('fs.img'):
-    MasterService.exposed_Master.exposed_Master.file2blocks,MasterService.exposed_Master.block2chunkservers = pickle.load(open('fs.img','rb'))
+    MasterService.exposed_Master.file2blocks, MasterService.exposed_Master.block2chunkservers = \
+      pickle.load(open('fs.img','rb'))
 
 
 if __name__ == "__main__":
   set_conf()
 
-  signal.signal(signal.SIGINT,signal_handler)# On Interrupt
-  signal.signal(signal.SIGSEGV,signal_handler)# On Segmentation Fault
-  signal.signal(signal.SIGABRT,signal_handler)# On Abort 
+  signal.signal(signal.SIGINT, signal_handler)# On Interrupt
+  signal.signal(signal.SIGSEGV, signal_handler)# On Segmentation Fault
+  signal.signal(signal.SIGABRT, signal_handler)# On Abort 
 
-  t = ThreadedServer(MasterService.exposed_Master, port = 2131)
+  t = ThreadedServer(MasterService, port = 2131)
   t.start()
